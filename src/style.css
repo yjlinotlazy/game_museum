@@ -1,0 +1,35 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #222;
+  background: #f7f7f5;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+.app-shell { max-width: 980px; margin: 0 auto; padding: 2rem 1rem; }
+input { font: inherit; padding: .5rem; width: 100%; max-width: 28rem; }
+textarea { font: inherit; padding: .5rem; width: 100%; max-width: none; min-height: 8rem; }
+.node-form { padding: 1rem 0; margin: 1rem 0; border-bottom: 1px solid #ddd; }
+.node-form input, .node-form select { display: block; width: 100%; max-width: 32rem; margin: .5rem 0; }
+.node-form textarea { min-height: 6rem; margin: .5rem 0; }
+.node-form button { margin-right: .5rem; }
+.game-list { display: grid; gap: .5rem; }
+.game-card { display: flex; gap: 1rem; padding: .8rem; color: inherit; text-decoration: none; border-bottom: 1px solid #ddd; }
+.game-card span, .muted { color: #777; }
+.error { color: #a00; }
+.mode-switch { margin-bottom: 1rem; }
+.mode-switch button { border: 0; background: transparent; color: #1464a0; cursor: pointer; font: inherit; padding: 0; }
+.markdown { line-height: 1.7; }
+.image-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
+.museum-image { width: 100%; max-height: 240px; object-fit: contain; cursor: pointer; }
+.image-card { position: relative; }
+.image-actions { position: absolute; top: .25rem; right: .25rem; display: flex; gap: .2rem; }
+.image-actions button { border: 0; border-radius: 50%; background: #1565c0; color: white; cursor: pointer; width: 1.8rem; height: 1.8rem; }
+.image-actions button:last-child { background: #c62828; }
+.lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 2rem; background: #000d; }
+.lightbox img { max-width: 85vw; max-height: 85vh; object-fit: contain; }
+.lightbox button { font-size: 2.5rem; color: white; background: transparent; border: 0; cursor: pointer; }
+.guest .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.guest .museum-image { max-height: none; }
+small { color: #777; font-size: .6em; }
+@media (max-width: 600px) { .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
