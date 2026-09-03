@@ -1,35 +1,53 @@
 :root {
   font-family: system-ui, sans-serif;
-  color: #222;
-  background: #f7f7f5;
+  color: #30271f;
+  background: #d8c6a5;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; }
-.app-shell { max-width: 980px; margin: 0 auto; padding: 2rem 1rem; }
-input { font: inherit; padding: .5rem; width: 100%; max-width: 28rem; }
-textarea { font: inherit; padding: .5rem; width: 100%; max-width: none; min-height: 8rem; }
+body { margin: 0; font-size: 18px; background: radial-gradient(circle at 50% 0, #eadfc8, #cdb991 75%); }
+.app-shell { max-width: 1060px; min-height: 100vh; margin: 0 auto; padding: 1.5rem clamp(1rem, 4vw, 3.5rem) 4rem; background: #f3ead7; box-shadow: 0 0 2rem #5b402633; border-left: 1px solid #9c815d; border-right: 1px solid #9c815d; }
+h1, h2 { font-weight: normal; letter-spacing: .04em; }
+h1 { color: #542d20; border-bottom: 3px double #97714c; padding-bottom: .65rem; }
+h2 { color: #6b3926; margin-top: 2rem; padding-bottom: .35rem; border-bottom: 1px solid #b99b70; }
+a { color: #70402a; }
+input, select, textarea { font: inherit; color: inherit; background: #fffaf0; border: 1px solid #ae9166; border-radius: 2px; box-shadow: inset 0 1px 2px #5b40261c; }
+input { padding: .55rem .65rem; width: 100%; max-width: 28rem; }
+textarea { padding: .65rem; width: 100%; max-width: none; min-height: 8rem; }
+button { font: inherit; color: #f8efdd; background: #6b3926; border: 1px solid #4d261a; border-radius: 2px; padding: .45rem .8rem; cursor: pointer; box-shadow: 0 1px 1px #3d241733; }
+button:hover { background: #854b31; }
 .node-form { padding: 1rem 0; margin: 1rem 0; border-bottom: 1px solid #ddd; }
 .node-form input, .node-form select { display: block; width: 100%; max-width: 32rem; margin: .5rem 0; }
 .node-form textarea { min-height: 6rem; margin: .5rem 0; }
 .node-form button { margin-right: .5rem; }
-.game-list { display: grid; gap: .5rem; }
-.game-card { display: flex; gap: 1rem; padding: .8rem; color: inherit; text-decoration: none; border-bottom: 1px solid #ddd; }
-.game-card span, .muted { color: #777; }
-.error { color: #a00; }
+.game-list { display: grid; gap: .7rem; }
+.game-card { display: flex; gap: 1rem; padding: 1rem; color: inherit; text-decoration: none; background: #e8dac0; border: 1px solid #b79a70; border-left: 5px solid #6b3926; box-shadow: 0 2px 3px #5b40261c; }
+.game-card:hover { background: #f8efdD; }
+.game-card span, .muted { color: #806c54; }
+.error { color: #8f241c; }
 .mode-switch { margin-bottom: 1rem; }
 .mode-switch button { border: 0; background: transparent; color: #1464a0; cursor: pointer; font: inherit; padding: 0; }
-.markdown { line-height: 1.7; }
+.markdown { line-height: 1.8; }
 .image-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
-.museum-image { width: 100%; max-height: 240px; object-fit: contain; cursor: pointer; }
+.museum-image { display: block; width: 100%; max-height: 240px; object-fit: contain; cursor: pointer; background: transparent; border: 0; outline: 0; }
 .image-card { position: relative; }
+.repair-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.repair-card { display: block; padding: 0; background: transparent; border: 0; cursor: pointer; }
+.repair-card input { width: auto; margin: .15rem .35rem .35rem .15rem; }
+.repair-card .museum-image { max-height: 190px; }
+.repair-results { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.repair-result { position: relative; padding: 0; background: transparent; border: 0; }
+.repair-result button { position: absolute; top: .45rem; right: .45rem; width: 2rem; height: 2rem; padding: .25rem; background: #a52b20; }
+.repair-result .museum-image { max-height: 240px; }
 .image-actions { position: absolute; top: .25rem; right: .25rem; display: flex; gap: .2rem; }
 .image-actions button { border: 0; border-radius: 50%; background: #1565c0; color: white; cursor: pointer; width: 1.8rem; height: 1.8rem; }
 .image-actions button:last-child { background: #c62828; }
-.lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 2rem; background: #000d; }
+.lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 2rem; background: #1e1713ed; }
 .lightbox img { max-width: 85vw; max-height: 85vh; object-fit: contain; }
 .lightbox button { font-size: 2.5rem; color: white; background: transparent; border: 0; cursor: pointer; }
 .guest .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guest .museum-image { max-height: none; }
-small { color: #777; font-size: .6em; }
+small { color: #806c54; font-size: .6em; }
 @media (max-width: 600px) { .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .repair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .repair-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

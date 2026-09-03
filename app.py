@@ -24,12 +24,107 @@ try:
 except ImportError:  # Keep the error useful instead of failing during import.
     yaml = None
 
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageOps
+except ImportError:  # The repair tool reports a per-image error if optional image deps are absent.
+    cv2 = None
+    np = None
+    Image = None
+    ImageOps = None
+
 CONFIG_PATH = Path.home() / ".config" / "game_museum" / "config.yaml"
-PLATFORMS = ["NES", "SNES", "GB", "GBA", "N64", "PS1", "PS2", "Arcade"]
+PLATFORMS = ["NES", "SNES", "GB", "GBA", "N64", "PS1", "PS2", "NDS", "3DS", "Arcade"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SECTION_NAMES = ["基本资料", "简介", "随记", "存档节点"]
 TRASH_DIRNAME = ".trash"
 DIST_DIR = Path(__file__).resolve().parent / "dist"
+
+
+def fixed_stem(path: Path) -> bool:
+    return path.stem.casefold().endswith("_fixed") or re.search(r"_fixed_\d+$", path.stem, re.IGNORECASE) is not None
+
+
+def trim_black_borders(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    dark = gray < 70
+    top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
+
+    row_profile = dark.mean(axis=1)
+    col_profile = dark.mean(axis=0)
+    min_band = max(3, round(min(image.shape[:2]) * 0.004))
+
+    def find_band(profile, start, step, limit):
+        index = start
+        while 0 <= index < limit:
+            if profile[index] > 0.58:
+                candidate = index
+                while 0 <= candidate < limit and profile[candidate] > 0.58:
+                    candidate += step
+                if abs(candidate - index) >= min_band:
+                    return candidate
+                index = candidate
+            else:
+                index += step
+        return start
+
+    top = find_band(row_profile, 0, 1, len(row_profile))
+    bottom = find_band(row_profile, len(row_profile) - 1, -1, len(row_profile)) + 1
+    left = find_band(col_profile, 0, 1, len(col_profile))
+    right = find_band(col_profile, len(col_profile) - 1, -1, len(col_profile)) + 1
+    if bottom <= top or right <= left or (bottom - top) < 20 or (right - left) < 20:
+        return image
+    return image[top:bottom, left:right]
+
+
+def repair_image(source: Path) -> Path:
+    if cv2 is None or np is None or Image is None:
+        raise RuntimeError("未安装截图修复依赖，请运行 pip install -r requirements.txt")
+    with Image.open(source) as image:
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        pixels = np.asarray(image)
+    height, width = pixels.shape[:2]
+    scale = min(1.0, 1400.0 / max(height, width))
+    small = cv2.resize(pixels, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else pixels
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    small_area = small.shape[0] * small.shape[1]
+    candidates = []
+    for contour in contours:
+        perimeter = cv2.arcLength(contour, True)
+        polygon = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+        area = cv2.contourArea(polygon)
+        if len(polygon) != 4 or area < small_area * 0.12 or area > small_area * 0.98 or not cv2.isContourConvex(polygon):
+            continue
+        points = polygon.reshape(4, 2).astype(np.float32)
+        sides = [np.linalg.norm(points[i] - points[(i + 1) % 4]) for i in range(4)]
+        if min(sides) < min(small.shape[:2]) * 0.12:
+            continue
+        candidates.append((area, points))
+    if not candidates:
+        raise ValueError("未识别到屏幕边界")
+    _, points = max(candidates, key=lambda candidate: candidate[0])
+    sums, differences = points.sum(axis=1), np.diff(points, axis=1).ravel()
+    ordered = np.array([points[np.argmin(sums)], points[np.argmin(differences)], points[np.argmax(sums)], points[np.argmax(differences)]], dtype=np.float32)
+    ordered /= scale
+    top_left, top_right, bottom_right, bottom_left = ordered
+    output_width = max(np.linalg.norm(bottom_right - bottom_left), np.linalg.norm(top_right - top_left))
+    output_height = max(np.linalg.norm(top_right - bottom_right), np.linalg.norm(top_left - bottom_left))
+    output_width, output_height = max(1, round(output_width)), max(1, round(output_height))
+    destination = np.array([[0, 0], [output_width - 1, 0], [output_width - 1, output_height - 1], [0, output_height - 1]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(ordered, destination)
+    fixed = trim_black_borders(cv2.warpPerspective(pixels, matrix, (output_width, output_height)))
+    target = source.with_name(f"{source.stem}_fixed{source.suffix}")
+    counter = 1
+    while target.exists():
+        target = source.with_name(f"{source.stem}_fixed_{counter}{source.suffix}")
+        counter += 1
+    encoded = cv2.imencode(source.suffix.lower(), cv2.cvtColor(fixed, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95] if source.suffix.lower() in {".jpg", ".jpeg"} else [cv2.IMWRITE_PNG_COMPRESSION, 3])[1]
+    target.write_bytes(encoded.tobytes())
+    return target
 
 
 def fail(message: str) -> None:
@@ -346,7 +441,7 @@ class Handler(BaseHTTPRequestHandler):
         directory = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if directory.exists():
             self.send_json({"error": "游戏已存在"}, HTTPStatus.CONFLICT); return
-        directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "saves").mkdir()
+        directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "creative").mkdir(); (directory / "saves").mkdir()
         replace_sections(directory / "game.md", {"基本资料": f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}", "简介": str(values.get("description", ""))})
         self.send_json({"path": str(directory.relative_to(self.config["library_dir"]))}, HTTPStatus.CREATED)
 
@@ -364,6 +459,34 @@ class Handler(BaseHTTPRequestHandler):
             (directory / ".archived").touch(); self.send_json({"ok": True}); return
         if action == "delete":
             shutil.rmtree(directory); self.send_json({"ok": True}); return
+        if action == "repair_images":
+            results = []
+            screenshots = (directory / "screenshots").resolve()
+            selected = values.get("images", [])
+            if not isinstance(selected, list):
+                self.send_json({"error": "图片选择格式错误"}, HTTPStatus.BAD_REQUEST); return
+            for relative_image in selected:
+                source = (self.config["library_dir"] / str(relative_image)).resolve()
+                result = {"source": str(relative_image)}
+                if screenshots not in source.parents or not source.is_file() or source.suffix.lower() not in IMAGE_EXTENSIONS:
+                    result["error"] = "图片不存在或不是支持的截图格式"
+                elif fixed_stem(source):
+                    result["error"] = "已是修复图片"
+                else:
+                    try:
+                        result["output"] = str(repair_image(source).relative_to(self.config["library_dir"]))
+                        result["ok"] = True
+                    except Exception as exc:
+                        result["error"] = str(exc)
+                results.append(result)
+            self.send_json({"ok": True, "results": results}); return
+        if action == "delete_fixed_image":
+            image = (self.config["library_dir"] / str(values.get("image", ""))).resolve()
+            screenshots = (directory / "screenshots").resolve()
+            if screenshots not in image.parents or not image.is_file() or not fixed_stem(image):
+                self.send_json({"error": "修复图片不存在"}, HTTPStatus.NOT_FOUND); return
+            image.unlink()
+            self.send_json({"ok": True}); return
         if action == "scrape":
             duration = int(values.get("duration", 300)); now = datetime.now().timestamp(); destination = directory / "screenshots"; destination.mkdir(exist_ok=True); moved = []
             for item in self.config["screenshots_dir"].iterdir():
@@ -470,7 +593,7 @@ class Handler(BaseHTTPRequestHandler):
         directory = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if directory.exists():
             self.send_page("<p class='error'>游戏已存在。</p>", HTTPStatus.CONFLICT); return
-        directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "saves").mkdir()
+        directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "creative").mkdir(); (directory / "saves").mkdir()
         basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}"
         replace_sections(directory / "game.md", {"基本资料": basic, "简介": values.get("description", "")})
         self.redirect("/game/" + quote(str(directory.relative_to(self.config["library_dir"]))))
