@@ -1,12 +1,25 @@
 import { useEffect, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { Eye, EyeOff, Trash2 } from "lucide-react";
+import { Eye, EyeOff, Trash2, Wrench, Plus, Send, Terminal, Server } from "lucide-react";
 
 const PLATFORMS = ["NES", "SNES", "GB", "GBA", "N64", "PS1", "PS2", "NDS", "3DS", "Arcade"];
 
 function markdown(value) {
   return { __html: DOMPurify.sanitize(marked.parse(value || "")) };
+}
+
+function isFixedImage(image) {
+  return /_fixed(?:_\d+)?\.(?:png|jpe?g)$/i.test(image);
+}
+
+function screenshotKey(image) {
+  return image.replace(/_fixed(?:_\d+)?(?=\.(?:png|jpe?g)$)/i, "");
+}
+
+function preferredScreenshots(images) {
+  const fixedKeys = new Set(images.filter(isFixedImage).map(screenshotKey));
+  return images.filter((image) => isFixedImage(image) || !fixedKeys.has(screenshotKey(image)));
 }
 
 function defaultMode() {
@@ -21,7 +34,7 @@ function ModeSwitch({ mode, setMode }) {
     document.cookie = `museum_mode=${next}; Path=/; SameSite=Lax`;
     setMode(next);
   };
-  return <nav className="mode-switch">{mode === "curator" ? "馆长模式" : "老总模式"} · <button onClick={toggle}>切换模式</button></nav>;
+  return <nav className="mode-switch">{mode === "curator" ? "馆长模式" : "游客模式"} · <button onClick={toggle}>切换模式</button></nav>;
 }
 
 export default function App() {
@@ -31,6 +44,7 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [mode, setMode] = useState(defaultMode);
   const [creating, setCreating] = useState(window.location.pathname === "/new");
+  const toolbox = window.location.pathname === "/tools";
   const rawGamePath = window.location.pathname.startsWith("/game/") ? window.location.pathname.slice(6) : null;
   const tools = Boolean(rawGamePath && rawGamePath.endsWith("/tools"));
   const gamePath = rawGamePath ? decodeURIComponent(tools ? rawGamePath.slice(0, -6) : rawGamePath) : null;
@@ -43,10 +57,41 @@ export default function App() {
   }, [gamePath, mode]);
 
   if (creating) return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><h1>新建游戏</h1><CreateGame onDone={(path) => { window.history.pushState({}, "", `/game/${encodeURIComponent(path)}`); window.location.reload(); }} /></main>;
+  if (toolbox) return <Toolbox mode={mode} setMode={setMode} />;
   if (detail) return tools ? <RepairTool detail={detail} setDetail={setDetail} mode={mode} setMode={setMode} gamePath={gamePath} /> : <GameDetail detail={detail} setDetail={setDetail} mode={mode} setMode={setMode} gamePath={gamePath} />;
 
   const filtered = games.filter((game) => game.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
-  return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><header><h1>复古游戏博物馆</h1><input placeholder="搜索游戏名" value={query} onChange={(event) => setQuery(event.target.value)} /></header>{mode === "curator" && <p><a href="/new">新建游戏</a></p>}{error && <p className="error">{error}</p>}{!error && filtered.length === 0 && <p className="muted">{query ? "没有找到游戏" : "没有游戏"}</p>}<section className="game-list">{filtered.map((game) => <a className="game-card" href={`/game/${encodeURIComponent(game.path)}`} key={game.path}><strong>{game.name}</strong><span>{game.platform}</span></a>)}</section></main>;
+  return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} />{mode === "curator" && <p className="top-tools"><a href="/tools">馆长的工具箱</a></p>}<header><h1>复古游戏博物馆</h1><input placeholder="搜索游戏名" value={query} onChange={(event) => setQuery(event.target.value)} /></header>{mode === "curator" && <p><a href="/new">新建游戏</a></p>}{error && <p className="error">{error}</p>}{!error && filtered.length === 0 && <p className="muted">{query ? "没有找到游戏" : "没有游戏"}</p>}<section className="game-list">{filtered.map((game) => <a className="game-card" href={`/game/${encodeURIComponent(game.path)}`} key={game.path}><strong>{game.name}</strong><span>{game.platform}</span></a>)}</section></main>;
+}
+
+function TerminalPathInput({ label, value, onChange, suggestions = [], required = true }) {
+  const listId = `${label}-path-suggestions`;
+  return <label className="terminal-field"><span>{label}</span><div className="terminal-input"><Terminal size={16} /><input required={required} list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="/path/to/file-or-folder" /><datalist id={listId}>{suggestions.map((item) => <option key={item} value={item} />)}</datalist></div></label>;
+}
+
+function Toolbox({ mode, setMode }) {
+  const [devices, setDevices] = useState(() => JSON.parse(localStorage.getItem("museum_devices") || "[]"));
+  const [device, setDevice] = useState(null);
+  const [name, setName] = useState("");
+  const [ip, setIp] = useState("");
+  const [source, setSource] = useState("");
+  const [destination, setDestination] = useState("/mnt/mmc/ROMS/");
+  const [kind, setKind] = useState("ROM");
+  const [status, setStatus] = useState("");
+  const suggestions = JSON.parse(localStorage.getItem("museum_path_history") || "[]");
+  const saveDevices = (next) => { setDevices(next); localStorage.setItem("museum_devices", JSON.stringify(next)); };
+  const addDevice = (event) => { event.preventDefault(); if (!name.trim() || !ip.trim()) return; const next = [...devices, { name: name.trim(), ip: ip.trim(), user: "root", port: 22 }]; saveDevices(next); setDevice(next.at(-1)); setName(""); setIp(""); };
+  const transfer = async (event) => {
+    event.preventDefault();
+    if (!device) { setStatus("请先选择设备"); return; }
+    setStatus("传输中…");
+    localStorage.setItem("museum_path_history", JSON.stringify([...new Set([source, destination, ...suggestions].filter(Boolean))].slice(0, 20)));
+    const response = await fetch("/api/tools/transfer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device, source, destination, kind }) });
+    const data = await response.json();
+    setStatus(response.ok ? (data.message || "传输完成") : (data.error || "传输失败"));
+  };
+  if (mode !== "curator") return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><p>馆长的工具箱仅在馆长模式下可用。</p><a href="/">返回游戏列表</a></main>;
+  return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><p><a href="/">← 游戏列表</a></p><h1>馆长的工具箱</h1><p className="toolbox-intro">通过 SSH 手动把文件传到已配置的设备。</p><section className="toolbox-panel"><h2><Server size={21} /> 设备</h2>{devices.length > 0 && <div className="device-list">{devices.map((item) => <button type="button" className={device?.ip === item.ip ? "device selected" : "device"} key={`${item.name}-${item.ip}`} onClick={() => setDevice(item)}><strong>{item.name}</strong><span>{item.user}@{item.ip}:{item.port}</span></button>)}</div>}<form className="device-form" onSubmit={addDevice}><input required placeholder="设备名称" value={name} onChange={(event) => setName(event.target.value)} /><input required placeholder="IP 地址（可先填占位值）" value={ip} onChange={(event) => setIp(event.target.value)} /><button><Plus size={17} /> 添加设备</button></form></section><section className="toolbox-panel"><h2><Send size={21} /> 传输文件</h2><div className="transfer-tabs"><button type="button" className={kind === "ROM" ? "active" : ""} onClick={() => setKind("ROM")}>传 ROM</button><button type="button" className={kind === "截图" ? "active" : ""} onClick={() => setKind("截图")}>传截图</button></div><form onSubmit={transfer}><TerminalPathInput label={`${kind} 本地路径`} value={source} onChange={setSource} suggestions={suggestions} /><TerminalPathInput label="设备目标路径" value={destination} onChange={setDestination} suggestions={["/mnt/mmc/ROMS/", "/mnt/mmc/ROMS/NDS/", "/mnt/mmc/ROMS/3DS/", ...suggestions]} /><button disabled={!device || !source}><Send size={17} /> 传到 {device?.name || "设备"}</button>{status && <p className="transfer-status">{status}</p>}</form></section></main>;
 }
 
 function CreateGame({ onDone }) {
@@ -119,13 +164,26 @@ function RepairTool({ detail, setDetail, mode, setMode, gamePath }) {
 function GameDetail({ detail, setDetail, mode, setMode, gamePath }) {
   const [duration, setDuration] = useState("300");
   const [lightbox, setLightbox] = useState(null);
-  const galleryImages = [...detail.images, ...(detail.creative_images || [])];
+  const [draggingImage, setDraggingImage] = useState(null);
+  const screenshotImages = preferredScreenshots(detail.images);
+  const galleryImages = [...screenshotImages, ...(detail.creative_images || [])];
   const save = async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...data, action: "save" }) }); if (response.ok) setDetail({ ...detail, ...data }); };
   const toggleImage = async (image) => { const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "toggle_visibility", image }) }); if (response.ok) { const name = image.split("/").pop(); const hidden = new Set(detail.hidden_images || []); hidden.has(name) ? hidden.delete(name) : hidden.add(name); setDetail({ ...detail, hidden_images: [...hidden] }); } };
   const deleteImage = async (image) => { const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete_image", image }) }); if (response.ok) setDetail({ ...detail, images: detail.images.filter((item) => item !== image) }); };
   const archive = async () => { if (confirm("确定归档这个游戏？")) { const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "archive" }) }); if (response.ok) window.location.href = "/"; } };
   const remove = async () => { if (confirm("确定删除资料、截图和存档？ROM 不会被删除。")) { const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete" }) }); if (response.ok) window.location.href = "/"; } };
   const scrape = async () => { const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "scrape", duration }) }); if (response.ok) { const data = await response.json(); setDetail({ ...detail, images: [...detail.images, ...data.moved] }); } };
+  const reorderImage = async (targetImage) => {
+    if (!draggingImage || draggingImage === targetImage) return;
+    const next = [...screenshotImages];
+    const fromIndex = screenshotImages.indexOf(draggingImage);
+    const targetIndex = screenshotImages.indexOf(targetImage);
+    next.splice(fromIndex, 1);
+    next.splice(targetIndex, 0, draggingImage);
+    const response = await fetch(`/api/game/${encodeURIComponent(gamePath)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reorder_images", order: next }) });
+    if (response.ok) setDetail({ ...detail, images: [...next, ...detail.images.filter((image) => !screenshotImages.includes(image))] });
+    setDraggingImage(null);
+  };
   useEffect(() => {
     if (lightbox === null) return undefined;
     const onKey = (event) => {
@@ -137,8 +195,8 @@ function GameDetail({ detail, setDetail, mode, setMode, gamePath }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [lightbox, detail.images, detail.creative_images]);
   const changeLightbox = (step) => setLightbox((current) => { const index = galleryImages.indexOf(current); return galleryImages[(index + step + galleryImages.length) % galleryImages.length]; });
-  const renderImage = (image, editable = false) => <div className="image-card" key={image}><img className="museum-image" src={`/media/${encodeURIComponent(image)}`} onClick={() => setLightbox(image)} />{editable && <span className="image-actions"><button title="切换显示" onClick={() => toggleImage(image)}>{(detail.hidden_images || []).includes(image.split("/").pop()) ? <EyeOff size={16} /> : <Eye size={16} />}</button><button title="移到垃圾桶" onClick={() => deleteImage(image)}><Trash2 size={16} /></button></span>}</div>;
-  return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><a href="/">← 游戏列表</a>{mode === "curator" && <p><a href={`/game/${encodeURIComponent(gamePath)}/tools`}>工具</a></p>}<h1>{detail.name} <small>{detail.platform}</small></h1>{mode === "curator" && <form onSubmit={save}><p>游戏名<br /><input name="name" defaultValue={detail.name} /></p><p>平台<br /><select name="platform" defaultValue={detail.platform}>{PLATFORMS.map((p) => <option key={p}>{p}</option>)}</select></p><p>存档目录路径（可选）<br /><input name="save_dir" defaultValue={detail.save_dir} /></p><h2>简介</h2><textarea name="description" defaultValue={detail.description} /><h2>随记</h2><textarea name="note" defaultValue={detail.note} /><button>保存</button></form>}<section><h2>简介</h2>{detail.description && <div className="markdown" dangerouslySetInnerHTML={markdown(detail.description)} />}<h2>随记</h2>{detail.note && <div className="markdown" dangerouslySetInnerHTML={markdown(detail.note)} />}</section>{(detail.creative_images || []).length > 0 && <section><h2>二创</h2><div className="image-grid">{detail.creative_images.map((image) => renderImage(image))}</div></section>}<section><h2>截图</h2>{mode === "curator" && <p><select value={duration} onChange={(event) => setDuration(event.target.value)}><option value="300">最近 5 分钟</option><option value="600">最近 10 分钟</option><option value="1800">最近 30 分钟</option><option value="3600">最近 60 分钟</option><option value="18000">最近 5 小时</option></select><button onClick={scrape}>搜刮截图</button></p>}<div className="image-grid">{detail.images.map((image) => renderImage(image, mode === "curator"))}</div></section>{mode === "curator" && <><NodeEditor detail={detail} setDetail={setDetail} gamePath={gamePath} mode={mode} /><p><button onClick={archive}>归档</button> <button onClick={remove}>删除</button></p></>}{lightbox && <div className="lightbox" onClick={() => setLightbox(null)}><button onClick={(event) => { event.stopPropagation(); changeLightbox(-1); }}>‹</button><img src={`/media/${encodeURIComponent(lightbox)}`} onClick={(event) => event.stopPropagation()} /><button onClick={(event) => { event.stopPropagation(); changeLightbox(1); }}>›</button></div>}</main>;
+  const renderImage = (image, editable = false, repaired = false, sortable = false) => <div className="image-card" key={image} draggable={sortable} onDragStart={() => setDraggingImage(image)} onDragOver={(event) => event.preventDefault()} onDrop={() => reorderImage(image)}><img className="museum-image" src={`/media/${encodeURIComponent(image)}`} onClick={() => setLightbox(image)} />{repaired && <span className="repair-badge" title="已修复"><Wrench size={16} /></span>}{editable && <span className="image-actions"><button title="切换显示" onClick={() => toggleImage(image)}>{(detail.hidden_images || []).includes(image.split("/").pop()) ? <EyeOff size={16} /> : <Eye size={16} />}</button><button title="移到垃圾桶" onClick={() => deleteImage(image)}><Trash2 size={16} /></button></span>}</div>;
+  return <main className={`app-shell ${mode}`}><ModeSwitch mode={mode} setMode={setMode} /><a href="/">← 游戏列表</a>{mode === "curator" && <p><a href={`/game/${encodeURIComponent(gamePath)}/tools`}>工具</a></p>}<h1>{detail.name} <small>{detail.platform}</small></h1>{mode === "curator" && <form onSubmit={save}><p>游戏名<br /><input name="name" defaultValue={detail.name} /></p><p>平台<br /><select name="platform" defaultValue={detail.platform}>{PLATFORMS.map((p) => <option key={p}>{p}</option>)}</select></p><p>存档目录路径（可选）<br /><input name="save_dir" defaultValue={detail.save_dir} /></p><h2>简介</h2><textarea name="description" defaultValue={detail.description} /><h2>随记</h2><textarea name="note" defaultValue={detail.note} /><button>保存</button></form>}<section><h2>简介</h2>{detail.description && <div className="markdown" dangerouslySetInnerHTML={markdown(detail.description)} />}<h2>随记</h2>{detail.note && <div className="markdown" dangerouslySetInnerHTML={markdown(detail.note)} />}</section>{(detail.creative_images || []).length > 0 && <section><h2>二创</h2><div className="image-grid">{detail.creative_images.map((image) => renderImage(image))}</div></section>}<section><h2>截图</h2>{mode === "curator" && <p><select value={duration} onChange={(event) => setDuration(event.target.value)}><option value="300">最近 5 分钟</option><option value="600">最近 10 分钟</option><option value="1800">最近 30 分钟</option><option value="3600">最近 60 分钟</option><option value="18000">最近 5 小时</option></select><button onClick={scrape}>搜刮截图</button></p>}{mode === "curator" && <p className="muted">拖动截图可调整顺序。</p>}<div className="image-grid">{screenshotImages.map((image) => renderImage(image, mode === "curator", mode === "curator" && isFixedImage(image), mode === "curator"))}</div></section>{mode === "curator" && <><NodeEditor detail={detail} setDetail={setDetail} gamePath={gamePath} mode={mode} /><p><button onClick={archive}>归档</button> <button onClick={remove}>删除</button></p></>}{lightbox && <div className="lightbox" onClick={() => setLightbox(null)}><button onClick={(event) => { event.stopPropagation(); changeLightbox(-1); }}>‹</button><img src={`/media/${encodeURIComponent(lightbox)}`} onClick={(event) => event.stopPropagation()} /><button onClick={(event) => { event.stopPropagation(); changeLightbox(1); }}>›</button></div>}</main>;
 }
 
 function NodeEditor({ detail, setDetail, gamePath, mode }) {

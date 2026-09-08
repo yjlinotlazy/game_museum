@@ -26,11 +26,14 @@ button:hover { background: #854b31; }
 .game-card span, .muted { color: #806c54; }
 .error { color: #8f241c; }
 .mode-switch { margin-bottom: 1rem; }
+.top-tools { margin-top: -.5rem; }
 .mode-switch button { border: 0; background: transparent; color: #1464a0; cursor: pointer; font: inherit; padding: 0; }
 .markdown { line-height: 1.8; }
 .image-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
 .museum-image { display: block; width: 100%; max-height: 240px; object-fit: contain; cursor: pointer; background: transparent; border: 0; outline: 0; }
 .image-card { position: relative; }
+.curator .image-card[draggable="true"] { cursor: grab; }
+.curator .image-card[draggable="true"]:active { cursor: grabbing; }
 .repair-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
 .repair-card { display: block; padding: 0; background: transparent; border: 0; cursor: pointer; }
 .repair-card input { width: auto; margin: .15rem .35rem .35rem .15rem; }
@@ -40,6 +43,7 @@ button:hover { background: #854b31; }
 .repair-result button { position: absolute; top: .45rem; right: .45rem; width: 2rem; height: 2rem; padding: .25rem; background: #a52b20; }
 .repair-result .museum-image { max-height: 240px; }
 .image-actions { position: absolute; top: .25rem; right: .25rem; display: flex; gap: .2rem; }
+.repair-badge { position: absolute; top: .25rem; left: .25rem; display: grid; place-items: center; width: 1.8rem; height: 1.8rem; color: #f8efdd; background: #6b3926; border-radius: 50%; }
 .image-actions button { border: 0; border-radius: 50%; background: #1565c0; color: white; cursor: pointer; width: 1.8rem; height: 1.8rem; }
 .image-actions button:last-child { background: #c62828; }
 .lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 2rem; background: #1e1713ed; }
@@ -47,6 +51,25 @@ button:hover { background: #854b31; }
 .lightbox button { font-size: 2.5rem; color: white; background: transparent; border: 0; cursor: pointer; }
 .guest .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guest .museum-image { max-height: none; }
+.toolbox-intro { color: #806c54; }
+.toolbox-panel { margin: 1.5rem 0; padding: 0 1.2rem 1.2rem; background: #eadfc9; border: 1px solid #b99b70; }
+.toolbox-panel h2 { display: flex; align-items: center; gap: .45rem; }
+.device-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem; }
+.device { display: flex; flex-direction: column; align-items: flex-start; color: #30271f; background: #f8efdd; border: 1px solid #b99b70; text-align: left; }
+.device span { color: #806c54; font: .85rem ui-monospace, SFMono-Regular, monospace; }
+.device.selected { outline: 2px solid #6b3926; background: #fffaf0; }
+.device-form { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.device-form input { flex: 1 1 12rem; max-width: none; }
+.device-form button, .toolbox-panel form > button { display: inline-flex; align-items: center; gap: .35rem; }
+.transfer-tabs { display: flex; gap: .35rem; margin-bottom: 1.2rem; }
+.transfer-tabs button { background: #b99b70; }
+.transfer-tabs button.active { background: #6b3926; }
+.terminal-field { display: block; margin: 1rem 0; }
+.terminal-field > span { display: block; margin-bottom: .35rem; }
+.terminal-input { display: flex; align-items: center; gap: .5rem; padding: .05rem .65rem; color: #b8e6b8; background: #211b18; border: 1px solid #6f5745; border-radius: 3px; }
+.terminal-input input { max-width: none; padding: .55rem 0; color: #b8e6b8; background: transparent; border: 0; box-shadow: none; font-family: ui-monospace, SFMono-Regular, monospace; }
+.terminal-input input:focus { outline: 0; }
+.transfer-status { color: #6b3926; }
 small { color: #806c54; font-size: .6em; }
 @media (max-width: 600px) { .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .repair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -46,6 +47,26 @@ def fixed_stem(path: Path) -> bool:
     return path.stem.casefold().endswith("_fixed") or re.search(r"_fixed_\d+$", path.stem, re.IGNORECASE) is not None
 
 
+def screenshot_base_name(name: str) -> str:
+    return re.sub(r"_fixed(?:_\d+)?(?=\.(?:png|jpe?g)$)", "", name, flags=re.IGNORECASE)
+
+
+def order_screenshots(directory: Path, images: list[Path]) -> list[Path]:
+    order_file = directory / "screenshot_order.txt"
+    names = [line.strip() for line in order_file.read_text(encoding="utf-8").splitlines() if line.strip()] if order_file.is_file() else []
+    ranks = {name: index for index, name in enumerate(names)}
+    fallback = len(ranks)
+    return sorted(images, key=lambda image: (ranks.get(image.name, ranks.get(screenshot_base_name(image.name), fallback)), image.stat().st_mtime, image.name.casefold()))
+
+
+def save_screenshot_order(directory: Path, names: list[str]) -> None:
+    order_file = directory / "screenshot_order.txt"
+    if names:
+        order_file.write_text("\n".join(names) + "\n", encoding="utf-8")
+    elif order_file.exists():
+        order_file.unlink()
+
+
 def trim_black_borders(image):
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     dark = gray < 70
@@ -76,6 +97,15 @@ def trim_black_borders(image):
     if bottom <= top or right <= left or (bottom - top) < 20 or (right - left) < 20:
         return image
     return image[top:bottom, left:right]
+
+
+def enhance_screen(image):
+    """Reduce camera scanlines/moire while keeping the original dimensions."""
+    vertical_smoothed = cv2.GaussianBlur(image, (1, 5), 0)
+    softened = cv2.addWeighted(image, 0.3, vertical_smoothed, 0.7, 0)
+    denoised = cv2.bilateralFilter(softened, 5, 22, 22)
+    detail = cv2.GaussianBlur(denoised, (0, 0), 1.1)
+    return cv2.addWeighted(denoised, 1.22, detail, -0.22, 0)
 
 
 def repair_image(source: Path) -> Path:
@@ -116,12 +146,8 @@ def repair_image(source: Path) -> Path:
     output_width, output_height = max(1, round(output_width)), max(1, round(output_height))
     destination = np.array([[0, 0], [output_width - 1, 0], [output_width - 1, output_height - 1], [0, output_height - 1]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(ordered, destination)
-    fixed = trim_black_borders(cv2.warpPerspective(pixels, matrix, (output_width, output_height)))
+    fixed = enhance_screen(trim_black_borders(cv2.warpPerspective(pixels, matrix, (output_width, output_height))))
     target = source.with_name(f"{source.stem}_fixed{source.suffix}")
-    counter = 1
-    while target.exists():
-        target = source.with_name(f"{source.stem}_fixed_{counter}{source.suffix}")
-        counter += 1
     encoded = cv2.imencode(source.suffix.lower(), cv2.cvtColor(fixed, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95] if source.suffix.lower() in {".jpg", ".jpeg"} else [cv2.IMWRITE_PNG_COMPRESSION, 3])[1]
     target.write_bytes(encoded.tobytes())
     return target
@@ -321,7 +347,7 @@ def image_card(path: Path, library: Path, hidden: bool) -> str:
 
 
 def page(title: str, content: str, mode: str) -> bytes:
-    label = "馆长模式" if mode == "curator" else "老总模式"
+    label = "馆长模式" if mode == "curator" else "游客模式"
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{font-family:system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.6;color:#222}}a{{color:#1464a0}}input,select,textarea,button{{font:inherit;padding:.45rem;margin:.2rem 0}}textarea{{width:100%;min-height:8rem}}textarea.description{{min-height:3rem}}.game{{padding:.7rem 0;border-bottom:1px solid #ddd}}.muted{{color:#777}}.error{{color:#a00}}.shot{{display:inline-block;position:relative;margin:.4rem}}img.thumb{{max-width:180px;max-height:140px;display:block;object-fit:contain;cursor:pointer}}.trash{{position:absolute;right:0;top:0;border:0;background:#c62828;color:white;border-radius:50%;width:1.5rem;height:1.5rem;line-height:1rem;padding:0;cursor:pointer;font-weight:bold}}#mode{{margin-bottom:1rem}}.guest .admin-only{{display:none}}#viewer{{display:none;position:fixed;inset:0;background:#000d;align-items:center;justify-content:center;z-index:9999}}#viewer.open{{display:flex}}#viewer img{{max-width:85vw;max-height:85vh}}#viewer button{{position:fixed;background:#fff;border:0;font-size:2rem;cursor:pointer;z-index:10000}}#previous{{left:2vw}}#next{{right:2vw}}#close{{top:2vh;right:2vw}}</style></head><body class='{mode}'><nav id='mode'>{label} · <a href='/toggle-mode'>切换模式</a></nav>{content}<div id='viewer'><button type='button' id='previous' aria-label='上一张'>‹</button><img id='large-image' alt='截图大图'><button type='button' id='next' aria-label='下一张'>›</button><button type='button' id='close' aria-label='关闭'>×</button></div><script>const gallery=[...document.querySelectorAll('img.thumb')].map(image=>image.src);let current=0;const viewer=document.getElementById('viewer'),large=document.getElementById('large-image');function show(index){{if(!gallery.length)return;current=(index+gallery.length)%gallery.length;large.src=gallery[current];viewer.classList.add('open')}}document.querySelectorAll('img.thumb').forEach((image,index)=>image.onclick=()=>show(index));document.getElementById('previous').onclick=()=>show(current-1);document.getElementById('next').onclick=()=>show(current+1);document.getElementById('close').onclick=()=>viewer.classList.remove('open');viewer.onclick=event=>{{if(event.target===viewer)viewer.classList.remove('open')}};</script></body></html>""".encode()
 
 
@@ -384,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "没有找到游戏"}, HTTPStatus.NOT_FOUND)
                 return
             data = game_data(directory)
-            images = sorted((p for p in (directory / "screenshots").glob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS), key=lambda p: p.stat().st_mtime)
+            images = order_screenshots(directory, [p for p in (directory / "screenshots").glob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS])
             creative_images = sorted((p for p in (directory / "creative").glob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS), key=lambda p: p.stat().st_mtime)
             hidden = invisible_names(directory)
             if self.mode() == "guest":
@@ -395,7 +421,7 @@ class Handler(BaseHTTPRequestHandler):
             save_files = [p.name for p in Path(save_dir).iterdir() if p.is_file()] if save_dir and Path(save_dir).is_dir() else []
             self.send_json({"name": data["name"], "platform": data["platform"], "save_dir": save_dir, "description": data["description"], "note": data["note"], "images": [str(p.relative_to(self.config["library_dir"])) for p in images], "creative_images": [str(p.relative_to(self.config["library_dir"])) for p in creative_images], "hidden_images": sorted(hidden), "save_files": save_files, "nodes": parse_nodes(data["sections"].get("存档节点", ""))})
             return
-        if DIST_DIR.is_dir() and (parsed.path == "/" or parsed.path == "/new" or parsed.path.startswith("/game/") or parsed.path.startswith("/assets/")):
+        if DIST_DIR.is_dir() and (parsed.path == "/" or parsed.path == "/new" or parsed.path == "/tools" or parsed.path.startswith("/game/") or parsed.path.startswith("/assets/")):
             self.frontend(parsed.path.removeprefix("/"))
             return
         if parsed.path.startswith("/media/"):
@@ -415,6 +441,9 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/api/games":
                 self.create_api(json.loads(raw or "{}"))
+                return
+            if parsed.path == "/api/tools/transfer":
+                self.transfer_api(json.loads(raw or "{}"))
                 return
             if parsed.path.startswith("/api/game/"):
                 self.update_api(unquote(parsed.path[len("/api/game/"):]), json.loads(raw or "{}"))
@@ -444,6 +473,35 @@ class Handler(BaseHTTPRequestHandler):
         directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "creative").mkdir(); (directory / "saves").mkdir()
         replace_sections(directory / "game.md", {"基本资料": f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}", "简介": str(values.get("description", ""))})
         self.send_json({"path": str(directory.relative_to(self.config["library_dir"]))}, HTTPStatus.CREATED)
+
+    def transfer_api(self, values: dict):
+        device = values.get("device") or {}
+        source_value = str(values.get("source", "")).strip()
+        destination = str(values.get("destination", "")).strip()
+        if not isinstance(device, dict) or not source_value or not destination:
+            self.send_json({"error": "设备、本地路径和目标路径不能为空"}, HTTPStatus.BAD_REQUEST); return
+        source = Path(source_value).expanduser()
+        if not source.exists():
+            self.send_json({"error": f"本地路径不存在：{source}"}, HTTPStatus.BAD_REQUEST); return
+        host = str(device.get("ip", "")).strip()
+        user = str(device.get("user", "root")).strip() or "root"
+        try:
+            port = int(device.get("port", 22))
+        except (TypeError, ValueError):
+            port = 22
+        if not host:
+            self.send_json({"error": "设备 IP 不能为空"}, HTTPStatus.BAD_REQUEST); return
+        if shutil.which("rsync") is None:
+            self.send_json({"error": "本机未安装 rsync"}, HTTPStatus.BAD_REQUEST); return
+        command = ["rsync", "-avh", "--progress", "-e", f"ssh -p {port}", str(source), f"{user}@{host}:{destination}"]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            self.send_json({"error": "传输超时"}, HTTPStatus.GATEWAY_TIMEOUT); return
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()[-1:]
+            self.send_json({"error": detail[0] if detail else "SSH 传输失败"}, HTTPStatus.BAD_GATEWAY); return
+        self.send_json({"ok": True, "message": "传输完成"})
 
     def update_api(self, relative: str, values: dict):
         directory = (self.config["library_dir"] / relative).resolve()
@@ -480,12 +538,22 @@ class Handler(BaseHTTPRequestHandler):
                         result["error"] = str(exc)
                 results.append(result)
             self.send_json({"ok": True, "results": results}); return
+        if action == "reorder_images":
+            order = values.get("order", [])
+            screenshots = (directory / "screenshots").resolve()
+            if not isinstance(order, list) or any((self.config["library_dir"] / str(item)).resolve().parent != screenshots or not (self.config["library_dir"] / str(item)).is_file() for item in order):
+                self.send_json({"error": "截图排序数据无效"}, HTTPStatus.BAD_REQUEST); return
+            save_screenshot_order(directory, [Path(str(item)).name for item in order])
+            self.send_json({"ok": True}); return
         if action == "delete_fixed_image":
             image = (self.config["library_dir"] / str(values.get("image", ""))).resolve()
             screenshots = (directory / "screenshots").resolve()
             if screenshots not in image.parents or not image.is_file() or not fixed_stem(image):
                 self.send_json({"error": "修复图片不存在"}, HTTPStatus.NOT_FOUND); return
             image.unlink()
+            order_file = directory / "screenshot_order.txt"
+            if order_file.is_file():
+                save_screenshot_order(directory, [name for name in order_file.read_text(encoding="utf-8").splitlines() if name.strip() and name.strip() != image.name])
             self.send_json({"ok": True}); return
         if action == "scrape":
             duration = int(values.get("duration", 300)); now = datetime.now().timestamp(); destination = directory / "screenshots"; destination.mkdir(exist_ok=True); moved = []
@@ -508,6 +576,9 @@ class Handler(BaseHTTPRequestHandler):
                 while target.exists():
                     target = trash / f"{image.stem}_{counter}{image.suffix}"; counter += 1
                 shutil.move(str(image), str(target))
+                order_file = directory / "screenshot_order.txt"
+                if order_file.is_file():
+                    save_screenshot_order(directory, [name for name in order_file.read_text(encoding="utf-8").splitlines() if name.strip() and name.strip() != image.name])
             self.send_json({"ok": True}); return
         if action in {"node_add", "node_save", "node_delete"}:
             nodes = parse_nodes(sections.get("存档节点", ""))
