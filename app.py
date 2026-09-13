@@ -9,16 +9,22 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import threading
 import traceback
+from uuid import uuid4
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from server_logging import CountingWriter, RequestLogger, request_bytes
 
 try:
     import yaml
@@ -36,7 +42,7 @@ except ImportError:  # The repair tool reports a per-image error if optional ima
     ImageOps = None
 
 CONFIG_PATH = Path.home() / ".config" / "game_museum" / "config.yaml"
-PLATFORMS = ["NES", "SNES", "GB", "GBA", "N64", "PS1", "PS2", "NDS", "3DS", "Arcade"]
+PLATFORMS = ["NES", "SNES", "GB", "GBA", "N64", "PS1", "PS2", "PS3", "PSP", "NDS", "3DS", "Wii", "NGC", "NEO GEO", "Switch", "Arcade", "PC"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SECTION_NAMES = ["基本资料", "简介", "随记", "存档节点"]
 TRASH_DIRNAME = ".trash"
@@ -178,6 +184,7 @@ def load_config() -> dict[str, Path]:
         if not path.is_dir():
             fail(f"{key} 目录不存在：{path}")
         result[key] = path.resolve()
+    (result["library_dir"] / "inbox").mkdir(exist_ok=True)
     return result
 
 
@@ -215,7 +222,9 @@ def split_sections(text: str) -> tuple[str, dict[str, str], str]:
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         sections[match.group(1)] = text[match.end() : end].strip("\n")
-    suffix = text[matches[-1].end() :]
+    # The last recognized section extends to EOF; treating it as a suffix
+    # would append its contents again every time the file is saved.
+    suffix = ""
     return prefix, sections, suffix
 
 
@@ -264,6 +273,12 @@ def game_data(directory: Path) -> dict:
     }
 
 
+def save_directory(directory: Path) -> Path:
+    save_dir = directory / "saves"
+    save_dir.mkdir(exist_ok=True)
+    return save_dir
+
+
 def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
@@ -294,22 +309,35 @@ def parse_nodes(value: str) -> list[dict[str, str]]:
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
         block = value[match.end():end].strip()
+        id_match = re.search(r"<!-- node-id: ([a-zA-Z0-9_-]+) -->", block)
         file_match = re.search(r"^- 存档文件：(.+)$", block, re.MULTILINE)
-        description = re.sub(r"^- 存档文件：.+\n?", "", block, count=1).strip() if file_match else block
-        nodes.append({"name": match.group(1).strip(), "file": file_match.group(1).strip() if file_match else "", "description": description})
+        description = re.sub(r"<!-- node-id: [a-zA-Z0-9_-]+ -->\n?", "", block, count=1).strip()
+        description = re.sub(r"^- 存档文件：.+\n?", "", description, count=1).strip() if file_match else description
+        nodes.append({"id": id_match.group(1) if id_match else f"legacy-{index}", "name": match.group(1).strip(), "file": file_match.group(1).strip() if file_match else "", "description": description})
     return nodes
 
 
 def serialize_nodes(nodes: list[dict[str, str]]) -> str:
     blocks = []
     for node in nodes:
-        block = f"### {node['name']}\n\n"
+        block = f"### {node['name']}\n\n<!-- node-id: {node.get('id') or uuid4().hex} -->\n\n"
         if node.get("file"):
             block += f"- 存档文件：{node['file']}\n\n"
         if node.get("description"):
             block += node["description"].strip() + "\n\n"
         blocks.append(block.rstrip())
     return "\n\n".join(blocks)
+
+
+def unique_nodes(nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+    result = []
+    seen = set()
+    for node in nodes:
+        key = (node.get("name", ""), node.get("file", ""), node.get("description", ""))
+        if key not in seen:
+            seen.add(key)
+            result.append(node)
+    return result
 
 
 def invisible_names(directory: Path) -> set[str]:
@@ -353,11 +381,40 @@ def page(title: str, content: str, mode: str) -> bytes:
 
 class Handler(BaseHTTPRequestHandler):
     config: dict[str, Path] = {}
+    transfer_jobs = {}
+    transfer_jobs_lock = threading.Lock()
+    request_logger = RequestLogger(Path(__file__).resolve().parent, "game_museum")
+
+    def handle_one_request(self):
+        started_at = time.time()
+        self._telemetry_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        original_wfile = self.wfile
+        counted_wfile = CountingWriter(original_wfile)
+        self.wfile = counted_wfile
+        try:
+            super().handle_one_request()
+        finally:
+            self.wfile = original_wfile
+            try:
+                self.request_logger.record(
+                    method=getattr(self, "command", "UNKNOWN"),
+                    target=getattr(self, "path", ""),
+                    status=getattr(self, "_telemetry_status", HTTPStatus.INTERNAL_SERVER_ERROR),
+                    request_size=request_bytes(self.headers),
+                    response_size=counted_wfile.bytes_written,
+                    started_at=started_at,
+                )
+            except Exception:
+                pass
+
+    def send_response(self, code, message=None):
+        self._telemetry_status = int(code)
+        super().send_response(code, message)
 
     def send_page(self, content: str, status=HTTPStatus.OK):
         mode = self.mode()
         if mode == "guest":
-            content = "<style>.guest form:not(:has(input[name='q'])){display:block}.guest form:not(:has(input[name='q'])) textarea,.guest form:not(:has(input[name='q'])) button,.guest form:not(:has(input[name='q'])) input,.guest form:not(:has(input[name='q'])) select{display:none}</style><script>document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('h2').forEach(heading=>{const title=heading.textContent.trim();if(title.includes('基本资料')||title.includes('存档')){heading.style.display='none';let item=heading.nextElementSibling;while(item && item.tagName!=='H2'){item.style.display='none';item=item.nextElementSibling}}if((title==='简介'||title==='随记')&&!heading.nextElementSibling?.nextElementSibling?.textContent.trim()){heading.style.display='none';let item=heading.nextElementSibling;while(item && item.tagName!=='H2'){item.style.display='none';item=item.nextElementSibling}}})})</script>" + content
+            content = "<style>.guest form:not(:has(input[name='q'])){display:block}.guest form:not(:has(input[name='q'])) textarea,.guest form:not(:has(input[name='q'])) button,.guest form:not(:has(input[name='q'])) input,.guest form:not(:has(input[name='q'])) select{display:none}</style><script>document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('h2').forEach(heading=>{const title=heading.textContent.trim();if(title==='基本资料'||title==='存档文件'){heading.style.display='none';let item=heading.nextElementSibling;while(item && item.tagName!=='H2'){item.style.display='none';item=item.nextElementSibling}}if((title==='简介'||title==='随记')&&!heading.nextElementSibling?.nextElementSibling?.textContent.trim()){heading.style.display='none';let item=heading.nextElementSibling;while(item && item.tagName!=='H2'){item.style.display='none';item=item.nextElementSibling}}})})</script>" + content
         content = "<style>.eye{position:absolute;right:1.7rem;top:0;border:0;background:#1565c0;color:white;border-radius:50%;width:1.5rem;height:1.5rem;line-height:1rem;padding:0;cursor:pointer;font-weight:bold}</style>" + content
         if mode == "guest":
             content = "<style>.guest .shot{width:calc(50% - 1rem);box-sizing:border-box}.guest img.thumb{width:100%;max-width:none;max-height:none;height:auto}</style>" + content
@@ -401,7 +458,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.SEE_OTHER); self.send_header("Location", back); self.send_header("Set-Cookie", f"museum_mode={target}; Path=/; SameSite=Lax"); self.end_headers(); return
         if parsed.path == "/api/games":
             games = sorted((game_data(p) for p in game_dirs(self.config["library_dir"])), key=lambda x: (x["name"].casefold(), x["platform"].casefold()))
-            self.send_json({"games": [{"name": g["name"], "platform": g["platform"], "path": str(g["path"].relative_to(self.config["library_dir"]))} for g in games]})
+            self.send_json({"games": [{"name": g["name"], "platform": g["platform"], "path": str(g["path"].relative_to(self.config["library_dir"]))} for g in games], "inbox_dir": str(self.config["library_dir"] / "inbox")})
+            return
+        if parsed.path == "/api/tools/transfer/status":
+            job_id = parse_qs(parsed.query).get("id", [""])[0]
+            with self.transfer_jobs_lock:
+                job = self.transfer_jobs.get(job_id)
+            if not job:
+                self.send_json({"error": "找不到传输任务"}, HTTPStatus.NOT_FOUND)
+            else:
+                self.send_json(job)
             return
         if parsed.path.startswith("/api/game/"):
             relative = unquote(parsed.path[len("/api/game/"):])
@@ -415,11 +481,9 @@ class Handler(BaseHTTPRequestHandler):
             hidden = invisible_names(directory)
             if self.mode() == "guest":
                 images = [p for p in images if p.name not in hidden]
-            basic = data["sections"].get("基本资料", "")
-            save_match = re.search(r"^- 存档目录：(.+)$", basic, re.MULTILINE)
-            save_dir = "" if not save_match or save_match.group(1).strip() == "没有" else save_match.group(1).strip()
-            save_files = [p.name for p in Path(save_dir).iterdir() if p.is_file()] if save_dir and Path(save_dir).is_dir() else []
-            self.send_json({"name": data["name"], "platform": data["platform"], "save_dir": save_dir, "description": data["description"], "note": data["note"], "images": [str(p.relative_to(self.config["library_dir"])) for p in images], "creative_images": [str(p.relative_to(self.config["library_dir"])) for p in creative_images], "hidden_images": sorted(hidden), "save_files": save_files, "nodes": parse_nodes(data["sections"].get("存档节点", ""))})
+            save_dir = save_directory(directory)
+            save_files = [p.name for p in save_dir.iterdir() if p.is_file()]
+            self.send_json({"name": data["name"], "platform": data["platform"], "save_dir": str(save_dir), "description": data["description"], "note": data["note"], "images": [str(p.relative_to(self.config["library_dir"])) for p in images], "creative_images": [str(p.relative_to(self.config["library_dir"])) for p in creative_images], "hidden_images": sorted(hidden), "save_files": save_files, "nodes": unique_nodes(parse_nodes(data["sections"].get("存档节点", "")))})
             return
         if DIST_DIR.is_dir() and (parsed.path == "/" or parsed.path == "/new" or parsed.path == "/tools" or parsed.path.startswith("/game/") or parsed.path.startswith("/assets/")):
             self.frontend(parsed.path.removeprefix("/"))
@@ -445,6 +509,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/tools/transfer":
                 self.transfer_api(json.loads(raw or "{}"))
                 return
+            if parsed.path == "/api/tools/delete-screenshots":
+                self.delete_screenshots_api(json.loads(raw or "{}"))
+                return
             if parsed.path.startswith("/api/game/"):
                 self.update_api(unquote(parsed.path[len("/api/game/"):]), json.loads(raw or "{}"))
                 return
@@ -462,27 +529,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_api(self, values: dict):
         name, platform = str(values.get("name", "")).strip(), values.get("platform", "")
-        save_dir = str(values.get("save_dir", "")).strip()
         if not name or platform not in PLATFORMS:
             self.send_json({"error": "游戏名和平台不能为空"}, HTTPStatus.BAD_REQUEST); return
-        if save_dir and not Path(save_dir).is_dir():
-            self.send_json({"error": "存档目录不存在或不是目录"}, HTTPStatus.BAD_REQUEST); return
         directory = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if directory.exists():
             self.send_json({"error": "游戏已存在"}, HTTPStatus.CONFLICT); return
         directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "creative").mkdir(); (directory / "saves").mkdir()
-        replace_sections(directory / "game.md", {"基本资料": f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}", "简介": str(values.get("description", ""))})
+        replace_sections(directory / "game.md", {"基本资料": f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{directory / 'saves'}", "简介": str(values.get("description", "")), "随记": str(values.get("note", ""))})
         self.send_json({"path": str(directory.relative_to(self.config["library_dir"]))}, HTTPStatus.CREATED)
 
     def transfer_api(self, values: dict):
         device = values.get("device") or {}
         source_value = str(values.get("source", "")).strip()
         destination = str(values.get("destination", "")).strip()
-        if not isinstance(device, dict) or not source_value or not destination:
+        kind = str(values.get("kind", "ROM"))
+        if kind not in {"ROM", "截图"} or not isinstance(device, dict) or not source_value or not destination:
             self.send_json({"error": "设备、本地路径和目标路径不能为空"}, HTTPStatus.BAD_REQUEST); return
-        source = Path(source_value).expanduser()
-        if not source.exists():
-            self.send_json({"error": f"本地路径不存在：{source}"}, HTTPStatus.BAD_REQUEST); return
+        local_path = Path(source_value).expanduser()
+        if kind == "截图" and not local_path.is_dir():
+            self.send_json({"error": f"本地保存目录不存在：{local_path}"}, HTTPStatus.BAD_REQUEST); return
+        if kind == "ROM" and not local_path.exists():
+            self.send_json({"error": f"本地路径不存在：{local_path}"}, HTTPStatus.BAD_REQUEST); return
         host = str(device.get("ip", "")).strip()
         user = str(device.get("user", "root")).strip() or "root"
         try:
@@ -493,15 +560,81 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "设备 IP 不能为空"}, HTTPStatus.BAD_REQUEST); return
         if shutil.which("rsync") is None:
             self.send_json({"error": "本机未安装 rsync"}, HTTPStatus.BAD_REQUEST); return
-        command = ["rsync", "-avh", "--progress", "-e", f"ssh -p {port}", str(source), f"{user}@{host}:{destination}"]
+        password = str(device.get("password", ""))
+        if not password:
+            self.send_json({"error": "设备未配置 SSH 密码，请先在设备配置中修改"}, HTTPStatus.BAD_REQUEST); return
+        if shutil.which("sshpass") is None:
+            self.send_json({"error": "本机未安装 sshpass，无法使用设备密码认证"}, HTTPStatus.BAD_REQUEST); return
+        remote_path = f"{user}@{host}:{destination}"
+        ssh_options = f"ssh -p {port} -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=accept-new"
+        command = ["sshpass", "-e", "rsync", "-avh", "--progress", "--stats", "--out-format=__GAME_MUSEUM_FILE__%i %n", "-e", ssh_options]
+        command += [remote_path, str(local_path)] if kind == "截图" else [str(local_path), remote_path]
+        job_id = uuid4().hex
+        with self.transfer_jobs_lock:
+            self.transfer_jobs[job_id] = {"state": "running", "completed": 0, "message": "传输中：已完成 0 个文件"}
+        threading.Thread(target=self.run_transfer, args=(job_id, command, password), daemon=True).start()
+        self.send_json({"job_id": job_id}, HTTPStatus.ACCEPTED)
+
+    def run_transfer(self, job_id: str, command: list[str], password: str) -> None:
+        environment = os.environ.copy()
+        environment["SSHPASS"] = password
+        completed = 0
+        output = []
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL, env=environment, bufsize=1)
+            started = time.monotonic()
+            assert process.stdout is not None
+            for line in process.stdout:
+                output.append(line)
+                if line.startswith("__GAME_MUSEUM_FILE__"):
+                    itemized = line[len("__GAME_MUSEUM_FILE__"):].lstrip()
+                    if not itemized.startswith("d"):
+                        completed += 1
+                        with self.transfer_jobs_lock:
+                            self.transfer_jobs[job_id].update(completed=completed, message=f"传输中：已完成 {completed} 个文件")
+                if time.monotonic() - started > 600:
+                    process.kill()
+                    raise subprocess.TimeoutExpired(command, 600)
+            returncode = process.wait()
+            if returncode != 0:
+                detail = [line.strip() for line in output if line.strip()][-1:]
+                result = {"state": "error", "completed": completed, "error": detail[0] if detail else "SSH 传输失败"}
+            else:
+                result = {"state": "done", "completed": completed, "message": f"传输 {completed} 个文件完成"}
         except subprocess.TimeoutExpired:
-            self.send_json({"error": "传输超时"}, HTTPStatus.GATEWAY_TIMEOUT); return
+            result = {"state": "error", "completed": completed, "error": "传输超时"}
+        except Exception as exc:
+            result = {"state": "error", "completed": completed, "error": str(exc)}
+        with self.transfer_jobs_lock:
+            self.transfer_jobs[job_id] = result
+
+    def delete_screenshots_api(self, values: dict) -> None:
+        device = values.get("device") or {}
+        remote_dir = str(values.get("destination", "")).strip()
+        password = str(device.get("password", "")) if isinstance(device, dict) else ""
+        host = str(device.get("ip", "")).strip() if isinstance(device, dict) else ""
+        user = str(device.get("user", "root")).strip() or "root" if isinstance(device, dict) else "root"
+        try:
+            port = int(device.get("port", 22))
+        except (TypeError, ValueError):
+            port = 22
+        if not remote_dir.startswith("/") or not host or not password:
+            self.send_json({"error": "设备配置或截图目录无效"}, HTTPStatus.BAD_REQUEST); return
+        if shutil.which("sshpass") is None:
+            self.send_json({"error": "本机未安装 sshpass，无法使用设备密码认证"}, HTTPStatus.BAD_REQUEST); return
+        ssh_options = ["-p", str(port), "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]
+        delete_command = f"find {shlex.quote(remote_dir)} -maxdepth 1 -type f -iname '*.png' -delete"
+        command = ["sshpass", "-e", "ssh", *ssh_options, f"{user}@{host}", delete_command]
+        environment = os.environ.copy()
+        environment["SSHPASS"] = password
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL, env=environment, timeout=60)
+        except subprocess.TimeoutExpired:
+            self.send_json({"error": "删除超时"}, HTTPStatus.GATEWAY_TIMEOUT); return
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip().splitlines()[-1:]
-            self.send_json({"error": detail[0] if detail else "SSH 传输失败"}, HTTPStatus.BAD_GATEWAY); return
-        self.send_json({"ok": True, "message": "传输完成"})
+            self.send_json({"error": detail[0] if detail else "删除失败"}, HTTPStatus.BAD_GATEWAY); return
+        self.send_json({"ok": True, "message": "已从设备删除 PNG 截图"})
 
     def update_api(self, relative: str, values: dict):
         directory = (self.config["library_dir"] / relative).resolve()
@@ -509,9 +642,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "没有找到游戏"}, HTTPStatus.NOT_FOUND); return
         path = directory / "game.md"
         _, sections, _ = split_sections(path.read_text(encoding="utf-8"))
-        basic = sections.get("基本资料", "")
-        save_match = re.search(r"^- 存档目录：(.+)$", basic, re.MULTILINE)
-        save_dir = "" if not save_match or save_match.group(1).strip() == "没有" else save_match.group(1).strip()
+        save_dir = save_directory(directory)
         action = values.get("action", "save")
         if action == "archive":
             (directory / ".archived").touch(); self.send_json({"ok": True}); return
@@ -582,27 +713,33 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True}); return
         if action in {"node_add", "node_save", "node_delete"}:
             nodes = parse_nodes(sections.get("存档节点", ""))
+            nodes = unique_nodes(nodes)
             index = int(values.get("index", -1))
+            node_id = str(values.get("id", ""))
             node_file = str(values.get("file", ""))
-            if node_file and node_file not in ({p.name for p in Path(save_dir).iterdir() if p.is_file()} if save_dir and Path(save_dir).is_dir() else set()):
+            if action != "node_delete" and node_file and node_file not in {p.name for p in save_dir.iterdir() if p.is_file()}:
                 self.send_json({"error": "存档文件不存在"}, HTTPStatus.BAD_REQUEST); return
-            if action == "node_add":
-                nodes.append({"name": str(values.get("name", "")).strip(), "file": node_file, "description": str(values.get("description", ""))})
-            elif 0 <= index < len(nodes):
-                if action == "node_delete": nodes.pop(index)
-                else: nodes[index] = {"name": str(values.get("name", "")).strip(), "file": node_file, "description": str(values.get("description", ""))}
+            if action == "node_delete":
+                target = next((position for position, node in enumerate(nodes) if node.get("id") == node_id), index)
+                if 0 <= target < len(nodes):
+                    nodes.pop(target)
+            elif action == "node_add":
+                new_node = {"id": uuid4().hex, "name": str(values.get("name", "")).strip(), "file": node_file, "description": str(values.get("description", ""))}
+                if new_node not in nodes:
+                    nodes.append(new_node)
+            else:
+                target = next((position for position, node in enumerate(nodes) if node.get("id") == node_id), index)
+                if 0 <= target < len(nodes):
+                    nodes[target] = {"id": nodes[target].get("id", node_id), "name": str(values.get("name", "")).strip(), "file": node_file, "description": str(values.get("description", ""))}
             replace_sections(path, {"存档节点": serialize_nodes(nodes)})
             self.send_json({"ok": True, "nodes": nodes}); return
         name, platform = str(values.get("name", "")).strip(), values.get("platform", "")
-        save_dir = str(values.get("save_dir", "")).strip()
         if not name or platform not in PLATFORMS:
             self.send_json({"error": "游戏名和平台不能为空"}, HTTPStatus.BAD_REQUEST); return
-        if save_dir and not Path(save_dir).is_dir():
-            self.send_json({"error": "存档目录不存在或不是目录"}, HTTPStatus.BAD_REQUEST); return
         target = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if target != directory and target.exists():
             self.send_json({"error": "目标游戏已存在"}, HTTPStatus.CONFLICT); return
-        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}"
+        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{target / 'saves'}"
         replace_sections(path, {"基本资料": basic, "简介": str(values.get("description", sections.get("简介", ""))), "随记": str(values.get("note", sections.get("随记", "")))})
         if target != directory:
             target.parent.mkdir(parents=True, exist_ok=True); directory.rename(target); relative = str(target.relative_to(self.config["library_dir"]))
@@ -622,7 +759,7 @@ class Handler(BaseHTTPRequestHandler):
     def detail(self, relative: str):
         if relative == "new":
             options = "".join(f"<option>{esc(p)}</option>" for p in PLATFORMS)
-            self.send_page(f"<h1>新建游戏</h1><form class='admin-only' method='post' action='/games/new'><p>游戏名<br><input name='name' required></p><p>平台<br><select name='platform'>{options}</select></p><p>存档目录路径（可选）<br><input name='save_dir'></p><p>简介<br><textarea name='description'></textarea></p><button>保存</button> <a href='/'>取消</a></form>")
+            self.send_page(f"<h1>新建游戏</h1><form class='admin-only' method='post' action='/games/new'><p>游戏名<br><input name='name' required></p><p>平台<br><select name='platform'>{options}</select></p><p>简介<br><textarea name='description'></textarea></p><button>保存</button> <a href='/'>取消</a></form>")
             return
         directory = (self.config["library_dir"] / relative).resolve()
         if directory not in list(game_dirs(self.config["library_dir"])):
@@ -634,38 +771,31 @@ class Handler(BaseHTTPRequestHandler):
         image_html = "".join(f"<div class='shot' id='shot-{esc(p.name)}'><img class='thumb' src='/media/{quote(str(p.relative_to(self.config['library_dir'])))}'><form class='admin-only' method='post'><input type='hidden' name='image' value='{esc(str(p.relative_to(self.config['library_dir'])))}'><button class='eye' name='action' value='toggle_visibility' title='切换显示' aria-label='切换显示'>{'🙈' if p.name in invisible else '👁'}</button><button class='trash' title='移动到垃圾桶' aria-label='移动到垃圾桶' name='action' value='delete_image' onclick=\"return confirm('移动到垃圾桶？')\">×</button></form></div>" for p in images)
         image_html = image_html.replace("🙈", visibility_icon(True)).replace("👁", visibility_icon(False))
         image_html = "".join(image_card(p, self.config["library_dir"], p.name in invisible) for p in images)
-        basic = data["sections"].get("基本资料", "")
-        save_match = re.search(r"^- 存档目录：(.+)$", basic, re.MULTILINE)
-        save_dir = "" if not save_match or save_match.group(1).strip() == "没有" else save_match.group(1).strip()
+        save_dir = save_directory(directory)
         platform_options = "".join(f"<option {'selected' if p == data['platform'] else ''}>{esc(p)}</option>" for p in PLATFORMS)
         ranges = {"300": "最近 5 分钟", "600": "最近 10 分钟", "1800": "最近 30 分钟", "3600": "最近 60 分钟", "18000": "最近 5 小时"}
         range_options = "".join(f"<option value='{seconds}'>{label}</option>" for seconds, label in ranges.items())
-        nodes = parse_nodes(data['sections'].get('存档节点', ''))
-        save_files = []
-        if save_dir and Path(save_dir).is_dir():
-            save_files = [p for p in Path(save_dir).iterdir() if p.is_file()]
+        nodes = unique_nodes(parse_nodes(data['sections'].get('存档节点', '')))
+        save_files = [p for p in save_dir.iterdir() if p.is_file()]
         file_options = "<option value=''>没有关联存档文件</option>" + "".join(f"<option value='{esc(str(p))}'>{esc(p.name)}</option>" for p in save_files)
         node_cards = []
         for index, node in enumerate(nodes):
             options = "<option value=''>没有关联存档文件</option>" + "".join(f"<option value='{esc(str(p))}' {'selected' if str(p) == node['file'] else ''}>{esc(p.name)}</option>" for p in save_files)
             node_cards.append(f"<details><summary>{esc(node['name'])}</summary><form class='admin-only' method='post'><input type='hidden' name='node_index' value='{index}'><p>节点名称<br><input name='node_name' value='{esc(node['name'])}' required></p><p>存档文件<br><select name='node_file'>{options}</select></p><p>说明<br><textarea name='node_description'>{esc(node['description'])}</textarea></p><button name='action' value='node_save'>保存节点</button> <button name='action' value='node_delete'>删除节点</button></form></details>")
         node_html = "".join(node_cards)
-        add_node = f"<form method='post'><h3>新增节点</h3><p>节点名称<br><input name='node_name' required></p><p>存档文件<br><select name='node_file'>{file_options}</select></p><p>说明<br><textarea name='node_description'></textarea></p><button name='action' value='node_add'>新增节点</button></form>"
+        add_node = f"<form method='post'><h3>保存节点</h3><p>节点名称<br><input name='node_name' required></p><p>存档文件<br><select name='node_file'>{file_options}</select></p><p>说明<br><textarea name='node_description'></textarea></p><button name='action' value='node_add'>保存节点</button></form>"
         save_html = "".join(f"<li>{esc(p.name)} <button type='button' onclick=\"navigator.clipboard.writeText({json.dumps(str(p))})\">复制路径</button></li>" for p in save_files)
-        self.send_page(f"<p><a href='/'>← 游戏列表</a></p><h1>{esc(data['name'])} <small>{esc(data['platform'])}</small></h1><form method='post'><h2>基本资料</h2><p>游戏名<br><input name='name' value='{esc(data['name'])}' required></p><p>平台<br><select name='platform'>{platform_options}</select></p><p>存档目录路径（可选）<br><input name='save_dir' value='{esc(save_dir)}'></p><h2>简介</h2><textarea class='description' name='description'>{esc(data['description'])}</textarea><div>{render_markdown(data['description'])}</div><h2>随记</h2><textarea name='note'>{esc(data['note'])}</textarea><div>{render_markdown(data['note'])}</div><p><button name='action' value='save'>保存</button></p></form><form method='post'><button name='action' value='archive'>归档</button> <button name='action' value='delete' onclick=\"return confirm('确定删除资料、截图和存档？ROM 不会被删除。')\">删除</button></form><h2>截图</h2><form method='post'><select name='duration'>{range_options}</select><button name='action' value='scrape'>搜刮截图</button></form>{image_html}<h2>存档文件</h2><ul>{save_html}</ul><h2>存档节点</h2>{node_html}{add_node}")
+        self.send_page(f"<p><a href='/'>← 游戏列表</a></p><h1>{esc(data['name'])} <small>{esc(data['platform'])}</small></h1><form method='post'><h2>基本资料</h2><p>游戏名<br><input name='name' value='{esc(data['name'])}' required></p><p>平台<br><select name='platform'>{platform_options}</select></p><h2>简介</h2><textarea class='description' name='description'>{esc(data['description'])}</textarea><div>{render_markdown(data['description'])}</div><h2>随记</h2><textarea name='note'>{esc(data['note'])}</textarea><div>{render_markdown(data['note'])}</div><p><button name='action' value='save'>保存</button></p></form><form method='post'><button name='action' value='archive'>归档</button> <button name='action' value='delete' onclick=\"return confirm('确定删除资料、截图和存档？ROM 不会被删除。')\">删除</button></form><h2>截图</h2><form method='post'><select name='duration'>{range_options}</select><button name='action' value='scrape'>搜刮截图</button></form>{image_html}<h2>存档文件</h2><ul>{save_html}</ul><h2>存档节点</h2>{node_html}{add_node}")
 
     def create(self, values):
         name, platform = values.get("name", "").strip(), values.get("platform", "")
         if not name or platform not in PLATFORMS:
             self.send_page("<p class='error'>游戏名和平台不能为空。</p>", HTTPStatus.BAD_REQUEST); return
-        save_dir = values.get("save_dir", "").strip()
-        if save_dir and not Path(save_dir).is_dir():
-            self.send_page("<p class='error'>存档目录不存在或不是目录。</p>", HTTPStatus.BAD_REQUEST); return
         directory = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if directory.exists():
             self.send_page("<p class='error'>游戏已存在。</p>", HTTPStatus.CONFLICT); return
         directory.mkdir(parents=True); (directory / "screenshots").mkdir(); (directory / "creative").mkdir(); (directory / "saves").mkdir()
-        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}"
+        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{directory / 'saves'}"
         replace_sections(directory / "game.md", {"基本资料": basic, "简介": values.get("description", "")})
         self.redirect("/game/" + quote(str(directory.relative_to(self.config["library_dir"]))))
 
@@ -726,15 +856,12 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect("/game/" + quote(relative))
             return
         name, platform = values.get("name", "").strip(), values.get("platform", "")
-        save_dir = values.get("save_dir", "").strip()
         if not name or platform not in PLATFORMS:
             self.send_page("<p class='error'>游戏名和平台不能为空。</p>", HTTPStatus.BAD_REQUEST); return
-        if save_dir and not Path(save_dir).is_dir():
-            self.send_page("<p class='error'>存档目录不存在或不是目录。</p>", HTTPStatus.BAD_REQUEST); return
         target = self.config["library_dir"] / safe_name(platform) / safe_name(name)
         if target != directory and target.exists():
             self.send_page("<p class='error'>目标游戏已存在。</p>", HTTPStatus.CONFLICT); return
-        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{save_dir or '没有'}"
+        basic = f"- 游戏名：{name}\n- 平台：{platform}\n- 存档目录：{target / 'saves'}"
         replace_sections(path, {"基本资料": basic, "简介": values.get("description", sections.get("简介", "")), "随记": values.get("note", sections.get("随记", ""))})
         if target != directory:
             target.parent.mkdir(parents=True, exist_ok=True)
