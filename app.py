@@ -84,16 +84,10 @@ def trim_black_borders(image):
 
     def find_band(profile, start, step, limit):
         index = start
-        while 0 <= index < limit:
-            if profile[index] > 0.58:
-                candidate = index
-                while 0 <= candidate < limit and profile[candidate] > 0.58:
-                    candidate += step
-                if abs(candidate - index) >= min_band:
-                    return candidate
-                index = candidate
-            else:
-                index += step
+        while 0 <= index < limit and profile[index] > 0.58:
+            index += step
+        if abs(index - start) >= min_band:
+            return index
         return start
 
     top = find_band(row_profile, 0, 1, len(row_profile))
@@ -152,7 +146,9 @@ def repair_image(source: Path) -> Path:
     output_width, output_height = max(1, round(output_width)), max(1, round(output_height))
     destination = np.array([[0, 0], [output_width - 1, 0], [output_width - 1, output_height - 1], [0, output_height - 1]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(ordered, destination)
-    fixed = enhance_screen(trim_black_borders(cv2.warpPerspective(pixels, matrix, (output_width, output_height))))
+    # The perspective boundary already defines the screen. A second dark-edge
+    # crop can mistake black game content for a border, especially in dark scenes.
+    fixed = enhance_screen(cv2.warpPerspective(pixels, matrix, (output_width, output_height)))
     target = source.with_name(f"{source.stem}_fixed{source.suffix}")
     encoded = cv2.imencode(source.suffix.lower(), cv2.cvtColor(fixed, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95] if source.suffix.lower() in {".jpg", ".jpeg"} else [cv2.IMWRITE_PNG_COMPRESSION, 3])[1]
     target.write_bytes(encoded.tobytes())
@@ -271,6 +267,10 @@ def game_data(directory: Path) -> dict:
         "note": sections.get("随记", "").strip(),
         "sections": sections,
     }
+
+
+def has_creative_images(directory: Path) -> bool:
+    return any(p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS for p in (directory / "creative").glob("*"))
 
 
 def save_directory(directory: Path) -> Path:
@@ -420,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
             content = "<style>.guest .shot{width:calc(50% - 1rem);box-sizing:border-box}.guest img.thumb{width:100%;max-width:none;max-height:none;height:auto}</style>" + content
         content = "<script>document.addEventListener('submit',async event=>{const form=event.target;if(!form.closest('.shot'))return;event.preventDefault();const button=event.submitter;const data=new FormData(form);if(button&&button.name)data.set(button.name,button.value);const response=await fetch(form.action||location.href,{method:'POST',body:data});if(!response.ok){location.reload();return}if(button?.value==='delete_image'){form.closest('.shot').remove()}else if(button?.value==='toggle_visibility'){const hidden=button.innerHTML.includes('M3 3l18 18');button.innerHTML=hidden?\"<svg width='16' height='16' viewBox='0 0 24 24'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z'/><circle cx='12' cy='12' r='3'/></svg>\":\"<svg width='16' height='16' viewBox='0 0 24 24'><path d='M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.9 4.2A10.8 10.8 0 0112 4c5 0 8.8 4 10 8a11.8 11.8 0 01-3.1 5.2M6.2 6.2A11.8 11.8 0 002 12c1.2 4 5 8 10 8a10.8 10.8 0 003.3-.5'/></svg>\"}});</script>" + content
         content = "<script>document.addEventListener('submit',()=>sessionStorage.setItem('museum_scroll',String(window.scrollY)));window.addEventListener('load',()=>{const y=sessionStorage.getItem('museum_scroll');if(y!==null){sessionStorage.removeItem('museum_scroll');window.scrollTo(0,Number(y))}});</script>" + content
-        data = page("复古游戏博物馆", content, mode)
+        data = page("游戏水族馆", content, mode)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -457,8 +457,8 @@ class Handler(BaseHTTPRequestHandler):
             back = self.headers.get("Referer", "/")
             self.send_response(HTTPStatus.SEE_OTHER); self.send_header("Location", back); self.send_header("Set-Cookie", f"museum_mode={target}; Path=/; SameSite=Lax"); self.end_headers(); return
         if parsed.path == "/api/games":
-            games = sorted((game_data(p) for p in game_dirs(self.config["library_dir"])), key=lambda x: (x["name"].casefold(), x["platform"].casefold()))
-            self.send_json({"games": [{"name": g["name"], "platform": g["platform"], "path": str(g["path"].relative_to(self.config["library_dir"]))} for g in games], "inbox_dir": str(self.config["library_dir"] / "inbox")})
+            games = sorted((game_data(p) for p in game_dirs(self.config["library_dir"])), key=lambda x: (PLATFORMS.index(x["platform"]) if x["platform"] in PLATFORMS else len(PLATFORMS), x["platform"].casefold(), x["name"].casefold()))
+            self.send_json({"games": [{"name": g["name"], "platform": g["platform"], "path": str(g["path"].relative_to(self.config["library_dir"])), "completed": (g["path"] / ".completed").exists(), "has_creative": has_creative_images(g["path"])} for g in games], "inbox_dir": str(self.config["library_dir"] / "inbox")})
             return
         if parsed.path == "/api/tools/transfer/status":
             job_id = parse_qs(parsed.query).get("id", [""])[0]
@@ -483,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                 images = [p for p in images if p.name not in hidden]
             save_dir = save_directory(directory)
             save_files = [p.name for p in save_dir.iterdir() if p.is_file()]
-            self.send_json({"name": data["name"], "platform": data["platform"], "save_dir": str(save_dir), "description": data["description"], "note": data["note"], "images": [str(p.relative_to(self.config["library_dir"])) for p in images], "creative_images": [str(p.relative_to(self.config["library_dir"])) for p in creative_images], "hidden_images": sorted(hidden), "save_files": save_files, "nodes": unique_nodes(parse_nodes(data["sections"].get("存档节点", "")))})
+            self.send_json({"name": data["name"], "platform": data["platform"], "completed": (directory / ".completed").exists(), "save_dir": str(save_dir), "description": data["description"], "note": data["note"], "images": [str(p.relative_to(self.config["library_dir"])) for p in images], "creative_images": [str(p.relative_to(self.config["library_dir"])) for p in creative_images], "hidden_images": sorted(hidden), "save_files": save_files, "nodes": unique_nodes(parse_nodes(data["sections"].get("存档节点", "")))})
             return
         if DIST_DIR.is_dir() and (parsed.path == "/" or parsed.path == "/new" or parsed.path == "/tools" or parsed.path.startswith("/game/") or parsed.path.startswith("/assets/")):
             self.frontend(parsed.path.removeprefix("/"))
@@ -597,8 +597,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise subprocess.TimeoutExpired(command, 600)
             returncode = process.wait()
             if returncode != 0:
-                detail = [line.strip() for line in output if line.strip()][-1:]
-                result = {"state": "error", "completed": completed, "error": detail[0] if detail else "SSH 传输失败"}
+                detail = [line.strip() for line in output if line.strip()][-5:]
+                result = {"state": "error", "completed": completed, "error": "\n".join(detail) if detail else "SSH 传输失败"}
             else:
                 result = {"state": "done", "completed": completed, "message": f"传输 {completed} 个文件完成"}
         except subprocess.TimeoutExpired:
@@ -644,6 +644,13 @@ class Handler(BaseHTTPRequestHandler):
         _, sections, _ = split_sections(path.read_text(encoding="utf-8"))
         save_dir = save_directory(directory)
         action = values.get("action", "save")
+        if action == "toggle_completed":
+            marker = directory / ".completed"
+            if marker.exists():
+                marker.unlink()
+            else:
+                marker.touch()
+            self.send_json({"ok": True, "completed": marker.exists()}); return
         if action == "archive":
             (directory / ".archived").touch(); self.send_json({"ok": True}); return
         if action == "delete":
@@ -754,7 +761,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = "<p class='muted'>没有游戏</p>" if not query else "<p class='muted'>没有找到游戏</p>"
         form = "<form><input name='q' placeholder='搜索游戏名' value='%s'><button>搜索</button></form>" % esc(query)
         new = "<p class='admin-only'><a href='/game/new'>新建游戏</a></p>"
-        self.send_page(f"<h1>复古游戏博物馆</h1>{form}{new}{rows}")
+        self.send_page(f"<h1>游戏水族馆</h1>{form}{new}{rows}")
 
     def detail(self, relative: str):
         if relative == "new":
@@ -939,7 +946,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 7007), Handler)
     server.timeout = 0.5
     watched = {path: path.stat().st_mtime for path in (Path(__file__).resolve(), Path(__file__).with_name("server.py")) if path.exists()}
-    print("复古游戏博物馆运行于 http://127.0.0.1:7007")
+    print("游戏水族馆运行于 http://127.0.0.1:7007")
     try:
         while True:
             server.handle_request()

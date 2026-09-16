@@ -21,9 +21,23 @@ button:hover { background: #854b31; }
 .node-form textarea { min-height: 6rem; margin: .5rem 0; }
 .node-form button { margin-right: .5rem; }
 .game-list { display: grid; gap: .7rem; }
-.game-card { display: flex; gap: 1rem; padding: 1rem; color: inherit; text-decoration: none; background: #e8dac0; border: 1px solid #b79a70; border-left: 5px solid #6b3926; box-shadow: 0 2px 3px #5b40261c; }
+.platform-group { display: grid; gap: .45rem; scroll-margin-top: 1rem; }
+.platform-group h2 { margin: .8rem 0 .1rem; font-size: 1.15rem; color: #6b3926; }
+.platform-menu { position: fixed; top: 50%; left: max(.5rem, calc((100vw - 1060px) / 2 - 6rem)); z-index: 5; display: grid; gap: .3rem; max-width: 8.5rem; padding: .8rem; background: #eadfc9ee; border: 1px solid #b99b70; box-shadow: 0 2px 8px #5b402633; transform: translateY(-50%); }
+.platform-menu span { color: #806c54; font-size: .95rem; }
+.platform-menu a { color: #1464a0; font-size: 1rem; text-decoration: none; }
+.platform-menu a:hover { text-decoration: underline; }
+.game-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 1rem; color: inherit; text-decoration: none; background: #e8dac0; border: 1px solid #b79a70; border-left: 5px solid #6b3926; box-shadow: 0 2px 3px #5b40261c; }
 .game-card:hover { background: #f8efdD; }
 .game-card span, .muted { color: #806c54; }
+.game-meta { display: flex; align-items: baseline; gap: .7rem; min-width: 0; }
+.game-card strong, .game-card span { display: block; }
+.game-stamps { display: flex; gap: .45rem; }
+.stamp { display: grid; place-items: center; width: 2rem; height: 2rem; border: 2px solid currentColor; border-radius: 50%; font-size: 1.15rem; transform: none; }
+.completed-stamp { color: #a52b20; }
+.creative-stamp { color: #1464a0; }
+@media (max-width: 1280px) { .platform-menu { position: static; display: flex; flex-wrap: wrap; max-width: none; margin: 0 0 1rem; transform: none; } .platform-menu span { width: 100%; } }
+@media (max-width: 600px) { .platform-menu { position: fixed; top: 50%; right: .5rem; left: auto; display: grid; flex-wrap: initial; max-width: 7rem; max-height: 70vh; margin: 0; padding: .55rem; overflow-y: auto; transform: translateY(-50%); opacity: .94; } .platform-menu span { width: auto; } }
 .error { color: #8f241c; }
 .mode-switch { margin-bottom: 1rem; }
 .top-tools { margin-top: -.5rem; }
@@ -32,7 +46,12 @@ button:hover { background: #854b31; }
 .image-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
 .museum-image { display: block; width: 100%; max-height: 240px; object-fit: contain; cursor: pointer; background: transparent; border: 0; outline: 0; }
 .image-card { position: relative; }
-.curator .image-card.hidden-image .museum-image { opacity: .8; }
+.image-loader { position: relative; display: block; min-height: 4rem; background: #eadfc9; }
+.image-loader.loading .museum-image { visibility: hidden; }
+.image-spinner { position: absolute; top: 50%; left: 50%; width: 1.8rem; height: 1.8rem; margin: -0.9rem; border: 3px solid #b99b70; border-top-color: #6b3926; border-radius: 50%; animation: image-spin .8s linear infinite; }
+.image-load-error { display: grid; min-height: 4rem; place-items: center; color: #8f241c; font-size: .9rem; }
+@keyframes image-spin { to { transform: rotate(360deg); } }
+.curator .image-card.hidden-image .museum-image { opacity: .5; }
 .curator .image-card[draggable="true"] { cursor: grab; }
 .curator .image-card[draggable="true"]:active { cursor: grabbing; }
 .repair-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
@@ -49,7 +68,12 @@ button:hover { background: #854b31; }
 .image-actions button:last-child { background: #c62828; }
 .lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 2rem; background: #1e1713ed; }
 .lightbox img { max-width: 85vw; max-height: 85vh; object-fit: contain; }
+.lightbox > img { display: block; visibility: visible !important; opacity: 1 !important; z-index: 1; }
+.lightbox-image { width: auto !important; height: auto !important; }
+.lightbox .image-loader { min-width: 3rem; min-height: 3rem; background: transparent; }
 .lightbox button { font-size: 2.5rem; color: white; background: transparent; border: 0; cursor: pointer; }
+.lightbox-actions { position: absolute; top: 1rem; left: 50%; display: flex; gap: .5rem; transform: translateX(-50%); }
+.lightbox-actions button { padding: .35rem .7rem; font-size: 1rem; background: #6b3926; border: 1px solid #f8efdd; }
 .guest .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guest .museum-image { max-height: none; }
 .toolbox-intro { color: #806c54; }
@@ -76,6 +100,10 @@ button:hover { background: #854b31; }
 .transfer-status { color: #6b3926; }
 .transfer-progress { display: block; margin-top: 0.75rem; width: 100%; }
 small { color: #806c54; font-size: .6em; }
-@media (max-width: 600px) { .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .repair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .repair-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) {
+  .image-grid, .guest .image-grid, .repair-grid, .repair-results { grid-template-columns: 1fr; }
+  .museum-image { max-height: none; }
+  .lightbox { gap: .25rem; padding: .25rem; }
+  .lightbox img { min-width: 0; max-width: calc(100vw - 3rem); max-height: 90vh; }
+  .lightbox button { flex: 0 0 1.25rem; padding: 0; font-size: 2rem; }
+}
