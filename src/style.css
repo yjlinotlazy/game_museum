@@ -72,7 +72,7 @@ button:hover { background: #854b31; }
 .lightbox-image { width: auto !important; height: auto !important; }
 .lightbox .image-loader { min-width: 3rem; min-height: 3rem; background: transparent; }
 .lightbox button { font-size: 2.5rem; color: white; background: transparent; border: 0; cursor: pointer; }
-.lightbox-actions { position: absolute; top: 1rem; left: 50%; display: flex; gap: .5rem; transform: translateX(-50%); }
+.lightbox-actions { position: fixed; top: 1rem; left: 50%; z-index: 12; display: flex; gap: .5rem; transform: translateX(-50%); }
 .lightbox-actions button { padding: .35rem .7rem; font-size: 1rem; background: #6b3926; border: 1px solid #f8efdd; }
 .guest .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guest .museum-image { max-height: none; }
